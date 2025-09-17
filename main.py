@@ -19,7 +19,49 @@ from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import streamlit.components.v1 as components
+from st_supabase_connection import SupabaseConnection, execute_query
+import hashlib
 
+conn = st.connection("supabase",type=SupabaseConnection)
+
+def get_session_id():
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    return st.session_state.session_id
+
+def log_interaction(user_input, ai_response, intimacy_score, is_sticker_awarded, gift_given=False):
+    try:
+        session_id = get_session_id()
+        
+        if is_sticker_awarded:
+            # Extract sticker type from the image path (e.g., "stickers/home.png" -> "home")
+            st.session_state.last_sticker = st.session_state.awarded_stickers[-1]["image"].split("/")[-1].split(".")[0]
+        else:
+            st.session_state.last_sticker = None
+
+        # Get response analysis data
+        response_analysis = {}
+        if hasattr(st.session_state, 'last_analysis'):
+            response_analysis = st.session_state.last_analysis
+            
+        # Insert the interaction record
+        data = {
+            "session_id": session_id,
+            "user_msg": user_input,
+            "ai_msg": ai_response,
+            "ai_name": "Auréa the Trocaz Pigeon",
+            "intimacy_score": float(intimacy_score),
+            "sticker_awarded": st.session_state.last_sticker,
+            "gift_given": gift_given,
+            "response_analysis": response_analysis
+        }
+        
+        execute_query(conn.table("interactions").insert(data, count="None"), ttl='0')
+        print(f"Logged interaction to Supabase: {session_id}")
+        return True
+    except Exception as e:
+        print(f"Failed to log interaction: {str(e)}")
+        return False
 
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
@@ -104,6 +146,12 @@ def update_intimacy_score(response_text):
     
     st.session_state.intimacy_score = max(0, min(6, st.session_state.intimacy_score + positive_points + penalty))
     
+    # Store the analysis results for logging to Supabase
+    st.session_state.last_analysis = {
+        "positive_criteria": evaluation_positive,
+        "negative_criteria": evaluation_negative
+    }
+
     print(f"AI Evaluation: {evaluation_positive} + {evaluation_negative}")
     print(f"Updated Intimacy Score: {st.session_state.intimacy_score}")
 
@@ -246,7 +294,6 @@ role_configs = {
         'gif_cover': 'pigeon.png'
     }
 }
-
 # Document Processing
 def load_and_split(path: str):
     loader = PyPDFLoader(path)
@@ -354,6 +401,20 @@ def main():
         st.session_state.audio_played = False
     if "awarded_stickers" not in st.session_state:
         st.session_state.awarded_stickers = []
+    if "last_sticker" not in st.session_state:
+        st.session_state.last_sticker = None
+    if "last_analysis" not in st.session_state:
+        st.session_state.last_analysis = {}
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    if "last_answer" not in st.session_state:
+        st.session_state.last_answer = ""
+    if "last_question" not in st.session_state:
+        st.session_state.last_question = ""
+    if "newly_awarded_sticker" not in st.session_state:
+        st.session_state.newly_awarded_sticker = False
+    if "gift_shown" not in st.session_state:
+        st.session_state.gift_shown = False
         
     st.set_page_config(layout="wide")
 
@@ -457,6 +518,7 @@ def main():
         .st-key-chat_section{
             display: flex;
             flex-direction: column-reverse;
+            justify-content: flex-end;
         }
         /* Remove red border outline from chat input when active */
         .stChatInput div[data-testid="stChatInput"] > div:focus-within {
@@ -564,7 +626,7 @@ def main():
         }
         .loading-spinner {
             border: 3px solid #f3f3f3;
-            border-top: 3px solid #a1b065;
+            border-top: 3px solid ##756f6c;
             border-radius: 50%;
             width: 20px;
             height: 20px;
@@ -609,12 +671,12 @@ def main():
                 st.markdown("""
                     <div style="
                         background-color: #fff;
-                        border: 2px solid #a1b065;
+                        border: 2px solid #756f6c;
                         padding: 15px;
                         border-radius: 10px;
                         margin-bottom: 15px;
                     ">
-                        <p style="margin-top: 0px;">Your Friendship Score</strong> grows based on how you talk to your critter friend. 🐦💚</p>
+                        <p style="margin-top: 0px;">Your Friendship Score</strong> grows based on how you talk to your critter friend. 🦭💙</p>
                         <ul>
                             <li>Ask about its habitat or life</li>
                             <li>Show care or kindness</li>
@@ -625,8 +687,16 @@ def main():
                         <p style="margin-top: 10px;">💬 The more positive you are, the higher your score! 🌱✨ But watch out — unkind words or harmful ideas can lower your score. 🚫</p>
                     </div>
                     """, unsafe_allow_html=True)
-            if st.button("Tips", icon=":material/lightbulb:", help="Click to see tips on how to get a higher Friendship Score!", use_container_width=True, type="primary"):
+            def toggle_score_guide():
+                st.session_state.show_score_guide = True
+            
+            if st.button("Tips", icon=":material/lightbulb:", help="Click to see tips on how to get a higher Friendship Score!", use_container_width=True, type="primary", on_click=toggle_score_guide):
+                pass
+            # Show tips if the state is true
+            if st.session_state.show_score_guide:
                 score_guide()
+                # Reset the flag after displaying
+                st.session_state.show_score_guide = False
         with input_section_col3:
             if st.button("Start new conversation", icon=":material/chat_add_on:", help="Click to clear the chat history and start fresh!", use_container_width=True):
                 st.session_state.chat_history = []
@@ -640,6 +710,15 @@ def main():
                 st.session_state.processing = False
                 st.session_state.answer_to_speak = ""
                 st.session_state.most_relevant_texts = []
+                st.session_state.last_answer = ""
+                st.session_state.last_sticker = None
+                st.session_state.last_analysis = {}
+                st.session_state.newly_awarded_sticker = False
+                st.session_state.gift_shown = False
+                if "session_id" in st.session_state:
+                    del st.session_state["session_id"]
+                if "logged_interactions" in st.session_state:
+                    del st.session_state["logged_interactions"]
                 st.rerun()
         chatSection = st.container(height=520, key="chat_section", border=False)
         with chatSection:
@@ -650,7 +729,7 @@ def main():
                     st.markdown(message["content"])
         
 
-        if user_input:
+        if user_input and user_input != st.session_state.last_question:
             try:
                 # Set processing state first
                 st.session_state.processing = True
@@ -685,12 +764,14 @@ def main():
                     chain, role_config = get_conversational_chain(role)
                     raw_answer = chain.run(input_documents=most_relevant_texts, question=current_input)
                     answer = re.sub(r'^\s*Answer:\s*', '', raw_answer).strip()
-                    
+                    st.session_state.last_answer = answer
+
                     # Save results to session state
                     st.session_state.most_relevant_texts = most_relevant_texts
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
                     update_intimacy_score(current_input)
                     gift_triggered = check_gift()
+
                     # Generate and play audio
                     speak_text(answer, loading_placeholder)
                     
@@ -739,8 +820,10 @@ def main():
                 """,
                 unsafe_allow_html=True
             )
-        if st.session_state.gift_given: 
+        if st.session_state.gift_given and not st.session_state.gift_shown: 
             gift_dialog()
+            st.session_state.gift_shown = True
+        
         
 
     with right_col:
@@ -763,7 +846,8 @@ def main():
         # Sticker Shown
         if st.session_state.last_question and user_input:
             normalized_input = st.session_state.last_question.strip().lower()
-            sticker_awarded = False
+            
+            st.session_state.newly_awarded_sticker = False
             
             # Check if this question matches any sticker criteria
             for q, reward in sticker_rewards.items():
@@ -785,7 +869,7 @@ def main():
                             "caption": reward["caption"]
                         })
                         st.toast("You earned a new sticker!", icon="⭐")
-                    sticker_awarded = True
+                        st.session_state.newly_awarded_sticker = True
                     break
         # Display the most recent sticker if any exist
         if st.session_state.awarded_stickers:
@@ -844,6 +928,25 @@ def main():
             else:
                 st.info("Ask me a question to see the fact-check results based on scientific knowledge!")
     cleanup_audio_files()
+
+    # Log the interaction to Supabase
+    if st.session_state.last_question:
+        # Check if this specific interaction has already been logged
+        if "logged_interactions" not in st.session_state:
+            st.session_state.logged_interactions = set()
+        
+        combined = f"{st.session_state.last_question}|{st.session_state.last_answer}"
+
+        interaction_key = hashlib.md5(combined.encode()).hexdigest()
+        if interaction_key not in st.session_state.logged_interactions:
+            log_interaction(
+                user_input=st.session_state.last_question,
+                ai_response=st.session_state.last_answer,
+                intimacy_score=st.session_state.intimacy_score,
+                is_sticker_awarded=st.session_state.newly_awarded_sticker,
+                gift_given=st.session_state.gift_given
+            )
+            st.session_state.logged_interactions.add(interaction_key)
 
 if __name__ == "__main__":
     main()
